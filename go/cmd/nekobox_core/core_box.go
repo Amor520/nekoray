@@ -8,15 +8,13 @@ import (
 	"github.com/matsuridayo/libneko/neko_common"
 	"github.com/matsuridayo/libneko/neko_log"
 	box "github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/boxapi"
-	boxmain "github.com/sagernet/sing-box/cmd/sing-box"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 var instance *box.Box
 var instance_cancel context.CancelFunc
 
 func setupCore() {
-	boxmain.SetDisableColor(true)
 	//
 	neko_log.SetupLog(50*1024, "./neko.log")
 	//
@@ -24,27 +22,41 @@ func setupCore() {
 		return instance
 	}
 	neko_common.DialContext = func(ctx context.Context, specifiedInstance interface{}, network, addr string) (net.Conn, error) {
+		var b *box.Box
 		if i, ok := specifiedInstance.(*box.Box); ok {
-			return boxapi.DialContext(ctx, i, network, addr)
+			b = i
+		} else {
+			b = instance
 		}
-		if instance != nil {
-			return boxapi.DialContext(ctx, instance, network, addr)
+		if b == nil {
+			return neko_common.DialContextSystem(ctx, network, addr)
 		}
-		return neko_common.DialContextSystem(ctx, network, addr)
+		outbound := b.Outbound().Default()
+		if proxyOutbound, ok := b.Outbound().Outbound("proxy"); ok {
+			outbound = proxyOutbound
+		}
+		return outbound.DialContext(ctx, network, M.ParseSocksaddr(addr))
 	}
 	neko_common.DialUDP = func(ctx context.Context, specifiedInstance interface{}) (net.PacketConn, error) {
+		var b *box.Box
 		if i, ok := specifiedInstance.(*box.Box); ok {
-			return boxapi.DialUDP(ctx, i)
+			b = i
+		} else {
+			b = instance
 		}
-		if instance != nil {
-			return boxapi.DialUDP(ctx, instance)
+		if b == nil {
+			return neko_common.DialUDPSystem(ctx)
 		}
-		return neko_common.DialUDPSystem(ctx)
+		outbound := b.Outbound().Default()
+		if proxyOutbound, ok := b.Outbound().Outbound("proxy"); ok {
+			outbound = proxyOutbound
+		}
+		return outbound.ListenPacket(ctx, M.Socksaddr{})
 	}
 	neko_common.CreateProxyHttpClient = func(specifiedInstance interface{}) *http.Client {
 		if i, ok := specifiedInstance.(*box.Box); ok {
-			return boxapi.CreateProxyHttpClient(i)
+			return createProxyHTTPClient(i)
 		}
-		return boxapi.CreateProxyHttpClient(instance)
+		return createProxyHTTPClient(instance)
 	}
 }

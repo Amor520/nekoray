@@ -14,6 +14,9 @@ rm -rf $DEST
 mkdir -p $DEST
 
 export CGO_ENABLED=0
+# 某些网络环境下 proxy.golang.org 会出现 TLS 异常；允许用户覆盖。
+: "${GOPROXY:=direct}"
+export GOPROXY
 
 #### Go: updater ####
 pushd go/cmd/updater
@@ -23,5 +26,6 @@ popd
 
 #### Go: nekobox_core ####
 pushd go/cmd/nekobox_core
-go build -v -o $DEST -trimpath -ldflags "-w -s -X github.com/matsuridayo/libneko/neko_common.Version_neko=$version_standalone" -tags "with_clash_api,with_gvisor,with_quic,with_wireguard,with_utls,with_ech"
+# with_ech 已在 sing-box 1.12+ 中弃用并会直接编译失败，移除即可（ECH 由标准库接管）。
+go build -v -o $DEST -trimpath -ldflags "-w -s -X github.com/matsuridayo/libneko/neko_common.Version_neko=$version_standalone -X github.com/sagernet/sing-box/constant.Version=$version_sing_box" -tags "with_clash_api,with_gvisor,with_quic,with_wireguard,with_utls"
 popd

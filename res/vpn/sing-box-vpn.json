@@ -3,29 +3,24 @@
         "level": "info"
     },
     "dns": {
-        "fakeip": {
-            "enabled": true,
-            "inet4_range": "198.18.0.0/15",
-            "inet6_range": "fc00::/18"
-        },
         "servers": [
             {
                 "tag": "dns-remote",
-                "address": "8.8.8.8",
+                "type": "udp",
+                "server": "8.8.8.8",
                 "detour": "neko-socks"
             },
             {
                 "tag": "dns-direct",
-                "address": "%DNS_ADDRESS%",
+                "type": "%DNS_TYPE%",
+                //%DNS_SERVER_FIELDS%
                 "detour": "direct"
             },
             {
-                "address": "fakeip",
-                "tag": "dns-fake"
-            },
-            {
-                "address": "rcode://success",
-                "tag": "dns-block"
+                "type": "fakeip",
+                "tag": "dns-fake",
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "fc00::/18"
             }
         ],
         "rules": [
@@ -34,13 +29,13 @@
                     32,
                     33
                 ],
-                "server": "dns-block"
+                "action": "predefined"
             },
             {
                 "domain_suffix": [
                     ".lan"
                 ],
-                "server": "dns-block"
+                "action": "predefined"
             },
             {
                 "process_name": [
@@ -62,13 +57,13 @@
             "type": "tun",
             "tag": "tun-in",
             "interface_name": "%TUN_NAME%",
-            "inet4_address": "172.19.0.1/28",
-            //%IPV6_ADDRESS%
+            "address": [
+                "172.19.0.1/28"//%IPV6_ADDRESS%
+            ],
             "mtu": %MTU%,
             "auto_route": true,
             "strict_route": %STRICT_ROUTE%,
             "stack": "%STACK%",
-            "endpoint_independent_nat": true,
             "sniff": false
         }
     ],
@@ -88,15 +83,12 @@
         {
             "type": "direct",
             "tag": "direct"
-        },
-        {
-            "type": "dns",
-            "tag": "dns-out"
         }
     ],
     "route": {
         "final": "%FINAL_OUT%",
         "auto_detect_interface": true,
+        "default_domain_resolver": "dns-direct",
         "rules": [
             {
                 "network": "udp",
@@ -129,7 +121,7 @@
                     "nekoray_core",
                     "nekoray_core.exe"
                 ],
-                "outbound": "dns-out"
+                "action": "hijack-dns"
             },
             {
                 "process_name": [
@@ -145,7 +137,7 @@
             ,
             {
                 "port": 53,
-                "outbound": "dns-out"
+                "action": "hijack-dns"
             }
         ]
     }
