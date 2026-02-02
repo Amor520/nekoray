@@ -93,35 +93,12 @@
        </widget>
       </item>
       <item>
-       <widget class="QToolButton" name="toolButton_ads">
+       <widget class="QToolButton" name="toolButton_cloud">
         <property name="text">
-         <string>Ads</string>
+         <string>Cloud</string>
         </property>
         <property name="icon">
          <iconset theme="b-internet-web-browser">
-          <normaloff>.</normaloff>.</iconset>
-        </property>
-        <property name="iconSize">
-         <size>
-          <width>24</width>
-          <height>24</height>
-         </size>
-        </property>
-        <property name="popupMode">
-         <enum>QToolButton::InstantPopup</enum>
-        </property>
-        <property name="toolButtonStyle">
-         <enum>Qt::ToolButtonTextUnderIcon</enum>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QToolButton" name="toolButton_document">
-        <property name="text">
-         <string>Document</string>
-        </property>
-        <property name="icon">
-         <iconset theme="b-dialog-question">
           <normaloff>.</normaloff>.</iconset>
         </property>
         <property name="iconSize">
@@ -457,9 +434,40 @@
         </property>
        </widget>
       </item>
-     </layout>
-    </item>
-   </layout>
+      <item>
+       <widget class="QToolButton" name="toolButton_info">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>18</width>
+          <height>18</height>
+         </size>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>18</width>
+          <height>18</height>
+         </size>
+        </property>
+        <property name="text">
+         <string>?</string>
+        </property>
+        <property name="autoRaise">
+         <bool>true</bool>
+        </property>
+        <property name="toolButtonStyle">
+         <enum>Qt::ToolButtonTextOnly</enum>
+        </property>
+       </widget>
+      </item>
+    </layout>
+   </item>
+  </layout>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">

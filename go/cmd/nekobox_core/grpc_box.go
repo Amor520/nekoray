@@ -30,6 +30,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 		if err != nil {
 			out.Error = err.Error()
 			instance = nil
+			instance_conn_tracker = nil
 		}
 	}()
 
@@ -66,6 +67,7 @@ func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (out *gen.ErrorResp
 
 	instance = nil
 	instance_stats = nil
+	instance_conn_tracker = nil
 
 	return
 }
@@ -125,7 +127,8 @@ func (s *server) QueryStats(ctx context.Context, in *gen.QueryStatsReq) (out *ge
 	if instance != nil && instance_stats != nil {
 		r, err := instance_stats.GetStats(ctx, &v2rayapi.GetStatsRequest{
 			Name:   fmt.Sprintf("outbound>>>%s>>>traffic>>>%s", in.Tag, in.Direct),
-			Reset_: false,
+			// v2ray stats is cumulative by default. Use Reset_ to get delta bytes to avoid double counting in GUI.
+			Reset_: true,
 		})
 		if err == nil && r != nil && r.Stat != nil {
 			out.Traffic = r.Stat.Value
@@ -137,7 +140,10 @@ func (s *server) QueryStats(ctx context.Context, in *gen.QueryStatsReq) (out *ge
 
 func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.ListConnectionsResp, error) {
 	out := &gen.ListConnectionsResp{
-		// TODO upstream api
+		NekorayConnectionsJson: "[]",
+	}
+	if instance_conn_tracker != nil {
+		out.NekorayConnectionsJson = connectionsToJSON(instance_conn_tracker.Manager())
 	}
 	return out, nil
 }

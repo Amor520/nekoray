@@ -2,6 +2,18 @@
 
 namespace NekoGui {
 
+    inline QString DefaultSyncWebdavUrl() {
+        return QStringLiteral("https://dav.jianguoyun.com/dav/");
+    }
+
+    inline QString DefaultSyncWebdavUsername() {
+        return QStringLiteral("1214698878@qq.com");
+    }
+
+    inline QString DefaultSyncWebdavPassword() {
+        return QStringLiteral("akr4z3skgbpg6zj4");
+    }
+
     class Routing : public JsonStore {
     public:
         QString direct_ip;
@@ -123,6 +135,16 @@ namespace NekoGui {
         bool sub_insecure = false;
         int sub_auto_update = -30;
 
+        // Sync (WebDAV)
+        QString sync_webdav_url = DefaultSyncWebdavUrl();
+        QString sync_webdav_username = DefaultSyncWebdavUsername();
+        QString sync_webdav_password = DefaultSyncWebdavPassword();
+        QString sync_password = "";
+        bool sync_auto_on_sub_update = false;
+        QString sync_last_local_hash = "";
+        QString sync_last_remote_etag = "";
+        qint64 sync_last_time = 0;
+
         // Security
         bool skip_cert = false;
         QString utlsFingerprint = "";
@@ -141,6 +163,8 @@ namespace NekoGui {
         // Routing
         QString custom_route_global = "{\"rules\": []}";
         QString active_routing = "Default";
+        // Draft slot for quick switching in routing dialog (User 1 preset).
+        QString routing_user1_draft = "";
 
         // VPN
         bool fake_dns = false;

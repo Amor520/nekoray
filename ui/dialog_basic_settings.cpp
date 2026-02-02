@@ -12,7 +12,13 @@
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QProcess>
 #include <QTimer>
+#include <QJsonDocument>
+#include <QDateTime>
+
+#include <functional>
+#include <memory>
 
 class ExtraCoreWidget : public QWidget {
 public:
@@ -206,6 +212,181 @@ DialogBasicSettings::DialogBasicSettings(QWidget *parent)
 
     D_LOAD_BOOL(skip_cert)
     ui->utlsFingerprint->setCurrentText(NekoGui::dataStore->utlsFingerprint);
+
+    // Sync (WebDAV)
+    ui->sync_webdav_url->setPlaceholderText("https://dav.jianguoyun.com/dav/NekoBox/");
+    ui->sync_password->setPlaceholderText(tr("Used for local encryption"));
+    D_LOAD_STRING(sync_webdav_url)
+    D_LOAD_STRING(sync_webdav_username)
+    D_LOAD_STRING(sync_webdav_password)
+    D_LOAD_STRING(sync_password)
+    D_LOAD_BOOL(sync_auto_on_sub_update)
+    auto apply_sync_defaults = [=] {
+        if (ui->sync_webdav_url->text().trimmed().isEmpty()) {
+            ui->sync_webdav_url->setText(NekoGui::DefaultSyncWebdavUrl());
+        }
+        if (ui->sync_webdav_username->text().isEmpty()) {
+            ui->sync_webdav_username->setText(NekoGui::DefaultSyncWebdavUsername());
+        }
+        if (ui->sync_webdav_password->text().isEmpty()) {
+            ui->sync_webdav_password->setText(NekoGui::DefaultSyncWebdavPassword());
+        }
+    };
+    apply_sync_defaults();
+
+    auto refresh_sync_status = [=] {
+        auto t = NekoGui::dataStore->sync_last_time;
+        QString timeTxt = (t > 0) ? DisplayTime(t) : tr("never");
+        ui->sync_status->setText(tr("Last sync: %1\nLast local hash: %2\nLast remote ETag: %3")
+                                     .arg(timeTxt,
+                                          NekoGui::dataStore->sync_last_local_hash,
+                                          NekoGui::dataStore->sync_last_remote_etag));
+    };
+    refresh_sync_status();
+
+    auto set_sync_buttons_enabled = [=](bool enabled) {
+        ui->sync_test->setEnabled(enabled);
+        ui->sync_push->setEnabled(enabled);
+        ui->sync_pull->setEnabled(enabled);
+        ui->sync_pull_backup->setEnabled(enabled);
+    };
+
+    auto start_sync = std::make_shared<std::function<void(const QString &, bool, const QString &)>>();
+    *start_sync = [=, start_sync](const QString &action, bool force, const QString &mode) {
+        auto program = NekoGui::FindNekoBoxSyncRealPath();
+        if (!QFileInfo::exists(program)) {
+            MessageBoxWarning(software_name, tr("Sync tool not found: %1\nPlease build it first (libs/build_go.sh).").arg(program));
+            return;
+        }
+
+        QJsonObject req;
+        req["action"] = action;
+        req["config_dir"] = QDir::currentPath();
+
+        QJsonObject webdav;
+        auto webdavUrl = ui->sync_webdav_url->text().trimmed();
+        auto webdavUser = ui->sync_webdav_username->text();
+        auto webdavPass = ui->sync_webdav_password->text();
+        if (webdavUrl.isEmpty()) webdavUrl = NekoGui::DefaultSyncWebdavUrl();
+        if (webdavUser.isEmpty()) webdavUser = NekoGui::DefaultSyncWebdavUsername();
+        if (webdavPass.isEmpty()) webdavPass = NekoGui::DefaultSyncWebdavPassword();
+        webdav["url"] = webdavUrl;
+        webdav["username"] = webdavUser;
+        webdav["password"] = webdavPass;
+        req["webdav"] = webdav;
+
+        QJsonObject crypto;
+        crypto["password"] = ui->sync_password->text();
+        req["crypto"] = crypto;
+
+        QJsonObject state;
+        state["last_local_hash"] = NekoGui::dataStore->sync_last_local_hash;
+        state["last_remote_etag"] = NekoGui::dataStore->sync_last_remote_etag;
+        req["state"] = state;
+
+        QJsonObject options;
+        options["force"] = force;
+        options["mode"] = mode;
+        options["timeout_sec"] = 25;
+        options["remote_filename"] = "nekobox_sync.bin";
+        options["user_agent"] = NekoGui::dataStore->GetUserAgent(true);
+        req["options"] = options;
+
+        auto proc = new QProcess(this);
+        set_sync_buttons_enabled(false);
+        proc->setProgram(program);
+        proc->setWorkingDirectory(QDir::currentPath());
+        proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+        connect(proc, &QProcess::errorOccurred, this, [=](QProcess::ProcessError) {
+            set_sync_buttons_enabled(true);
+            MessageBoxWarning(software_name, tr("Sync process error: %1").arg(proc->errorString()));
+            proc->deleteLater();
+        });
+
+        connect(proc, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                this, [=](int exitCode, QProcess::ExitStatus) {
+                    set_sync_buttons_enabled(true);
+                    auto out = proc->readAllStandardOutput();
+                    auto err = proc->readAllStandardError();
+                    proc->deleteLater();
+
+                    QJsonParseError perr{};
+                    auto doc = QJsonDocument::fromJson(out, &perr);
+                    if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+                        MessageBoxWarning(software_name, tr("Sync output parse failed.\nexit=%1\nstderr=%2").arg(exitCode).arg(QString::fromUtf8(err)));
+                        return;
+                    }
+
+                    auto obj = doc.object();
+                    bool ok = obj.value("ok").toBool();
+                    bool conflict = obj.value("conflict").toBool();
+                    auto msg = obj.value("message").toString();
+                    auto errStr = obj.value("error").toString();
+
+                    if (conflict) {
+                        QMessageBox box(GetMessageBoxParent());
+                        box.setIcon(QMessageBox::Warning);
+                        box.setWindowTitle(tr("Sync conflict"));
+                        box.setText(tr("Cloud and local both changed.\n%1").arg(msg));
+                        auto b_local = box.addButton(tr("Local overwrite cloud"), QMessageBox::AcceptRole);
+                        auto b_cloud = box.addButton(tr("Cloud overwrite local"), QMessageBox::DestructiveRole);
+                        auto b_backup = box.addButton(tr("Import cloud as backup"), QMessageBox::ActionRole);
+                        box.addButton(QMessageBox::Cancel);
+                        box.exec();
+
+                        if (box.clickedButton() == b_local) {
+                            (*start_sync)("push", true, "apply");
+                        } else if (box.clickedButton() == b_cloud) {
+                            (*start_sync)("pull", true, "apply");
+                        } else if (box.clickedButton() == b_backup) {
+                            (*start_sync)("pull", false, "backup");
+                        }
+                        return;
+                    }
+
+                    if (!ok) {
+                        MessageBoxWarning(software_name, tr("Sync failed.\n%1\n%2").arg(msg, errStr));
+                        return;
+                    }
+
+                    if (action == "push" || (action == "pull" && mode != "backup")) {
+                        NekoGui::dataStore->sync_last_local_hash = obj.value("local_hash").toString();
+                        NekoGui::dataStore->sync_last_remote_etag = obj.value("remote_etag").toString();
+                        NekoGui::dataStore->sync_last_time = obj.value("time").toVariant().toLongLong();
+                        NekoGui::dataStore->Save();
+                        refresh_sync_status();
+                    }
+
+                    if (action == "pull" && mode == "backup") {
+                        auto backupDir = obj.value("backup_dir").toString();
+                        MessageBoxInfo(software_name, tr("Downloaded to:\n%1").arg(backupDir));
+                        return;
+                    }
+
+                    if (action == "pull" && mode != "backup") {
+                        // Config files changed on disk; recommend restart to reload.
+                        auto n = QMessageBox::question(GetMessageBoxParent(), software_name, tr("Sync applied. Restart program to reload configs now?"),
+                                                       QMessageBox::Yes | QMessageBox::No);
+                        if (n == QMessageBox::Yes) {
+                            MW_dialog_message("", "RestartProgram");
+                        }
+                        return;
+                    }
+
+                    // test/status/push success
+                    MessageBoxInfo(software_name, tr("Sync: %1").arg(msg.isEmpty() ? tr("done") : msg));
+                });
+
+        proc->start();
+        proc->write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+        proc->closeWriteChannel();
+    };
+
+    connect(ui->sync_test, &QPushButton::clicked, this, [=] { (*start_sync)("test", false, "apply"); });
+    connect(ui->sync_push, &QPushButton::clicked, this, [=] { (*start_sync)("push", false, "apply"); });
+    connect(ui->sync_pull, &QPushButton::clicked, this, [=] { (*start_sync)("pull", false, "apply"); });
+    connect(ui->sync_pull_backup, &QPushButton::clicked, this, [=] { (*start_sync)("pull", false, "backup"); });
 }
 
 DialogBasicSettings::~DialogBasicSettings() {
@@ -279,6 +460,22 @@ void DialogBasicSettings::accept() {
 
     D_SAVE_BOOL(skip_cert)
     NekoGui::dataStore->utlsFingerprint = ui->utlsFingerprint->currentText();
+
+    // Sync (WebDAV)
+    if (ui->sync_webdav_url->text().trimmed().isEmpty()) {
+        ui->sync_webdav_url->setText(NekoGui::DefaultSyncWebdavUrl());
+    }
+    if (ui->sync_webdav_username->text().isEmpty()) {
+        ui->sync_webdav_username->setText(NekoGui::DefaultSyncWebdavUsername());
+    }
+    if (ui->sync_webdav_password->text().isEmpty()) {
+        ui->sync_webdav_password->setText(NekoGui::DefaultSyncWebdavPassword());
+    }
+    D_SAVE_STRING(sync_webdav_url)
+    D_SAVE_STRING(sync_webdav_username)
+    D_SAVE_STRING(sync_webdav_password)
+    D_SAVE_STRING(sync_password)
+    D_SAVE_BOOL(sync_auto_on_sub_update)
 
     // 关闭连接统计，停止刷新前清空记录。
     if (NekoGui::dataStore->traffic_loop_interval == 0 || !NekoGui::dataStore->connection_statistics) {

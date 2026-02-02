@@ -74,6 +74,10 @@ func createInstance(configContent string, statsOutbounds []string) (*box.Box, co
 		}
 	}
 
+	connTracker := newConnTracker(instance.Outbound())
+	instance.Router().AppendTracker(connTracker)
+	instance_conn_tracker = connTracker
+
 	err = instance.Start()
 	if err != nil {
 		cancel()

@@ -47,9 +47,195 @@
 #include <QMessageBox>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QRegularExpression>
+#include <QFontMetrics>
+#include <QProcess>
+
+#include <algorithm>
 
 void UI_InitMainWindow() {
     mainwindow = new MainWindow;
+}
+
+static bool g_sync_auto_running = false;
+
+static QString ReadCoreVersionLine() {
+    static bool tried = false;
+    static QString cached;
+    if (tried) return cached;
+    tried = true;
+
+    auto program = NekoGui::FindNekoBoxCoreRealPath();
+    if (!QFileInfo::exists(program)) return cached;
+
+    QProcess proc;
+    proc.setProgram(program);
+    proc.setArguments({});
+    proc.setProcessChannelMode(QProcess::MergedChannels);
+    proc.start();
+    if (!proc.waitForFinished(1500)) {
+        proc.kill();
+        return cached;
+    }
+    auto out = QString::fromUtf8(proc.readAllStandardOutput());
+    auto line = out.split("\n", Qt::SkipEmptyParts).value(0).trimmed();
+    if (!line.isEmpty()) {
+        cached = line;
+    }
+    return cached;
+}
+
+static QString FormatCoreVersion() {
+    auto line = ReadCoreVersionLine();
+    if (line.isEmpty()) return {};
+    QRegularExpression re("sing-box:\\s*([^\\s]+)");
+    auto m = re.match(line);
+    if (m.hasMatch()) {
+        return QStringLiteral("sing-box %1").arg(m.captured(1));
+    }
+    return line;
+}
+
+static QString ParseSubInfoForStatus(const QString &info) {
+    if (info.trimmed().isEmpty()) return {};
+
+    long long used = 0;
+    long long total = 0;
+    long long expire = 0;
+
+    auto re0m = QRegularExpression("total=([0-9]+)").match(info);
+    if (re0m.lastCapturedIndex() >= 1) {
+        total = re0m.captured(1).toLongLong();
+    } else {
+        return {};
+    }
+    auto re1m = QRegularExpression("upload=([0-9]+)").match(info);
+    if (re1m.lastCapturedIndex() >= 1) {
+        used += re1m.captured(1).toLongLong();
+    }
+    auto re2m = QRegularExpression("download=([0-9]+)").match(info);
+    if (re2m.lastCapturedIndex() >= 1) {
+        used += re2m.captured(1).toLongLong();
+    }
+    auto re3m = QRegularExpression("expire=([0-9]+)").match(info);
+    if (re3m.lastCapturedIndex() >= 1) {
+        expire = re3m.captured(1).toLongLong();
+    }
+
+    // Same wording as GroupItem for translation reuse.
+    return QObject::tr("Used: %1 Remain: %2 Expire: %3")
+        .arg(ReadableSize(used), ReadableSize(total - used), expire > 0 ? DisplayTime(expire, QLocale::ShortFormat) : "-");
+}
+
+static void TryAutoSyncAfterSubUpdate(MainWindow *mw) {
+    if (mw == nullptr) return;
+    if (!NekoGui::dataStore->sync_auto_on_sub_update) return;
+    if (g_sync_auto_running) {
+        MW_show_log("[Sync] already running, skip.");
+        return;
+    }
+
+    auto url = NekoGui::dataStore->sync_webdav_url.trimmed();
+    auto user = NekoGui::dataStore->sync_webdav_username;
+    auto pass = NekoGui::dataStore->sync_webdav_password;
+    auto crypto = NekoGui::dataStore->sync_password;
+    if (url.isEmpty()) url = NekoGui::DefaultSyncWebdavUrl();
+    if (user.isEmpty()) user = NekoGui::DefaultSyncWebdavUsername();
+    if (pass.isEmpty()) pass = NekoGui::DefaultSyncWebdavPassword();
+    if (url.isEmpty() || user.isEmpty() || pass.isEmpty() || crypto.isEmpty()) {
+        MW_show_log("[Sync] skipped: WebDAV not configured.");
+        return;
+    }
+
+    auto program = NekoGui::FindNekoBoxSyncRealPath();
+    if (!QFileInfo::exists(program)) {
+        MW_show_log("[Sync] skipped: sync tool not found: " + program);
+        return;
+    }
+
+    QJsonObject req;
+    req["action"] = "push";
+    req["config_dir"] = QDir::currentPath();
+    {
+        QJsonObject webdav;
+        webdav["url"] = url;
+        webdav["username"] = user;
+        webdav["password"] = pass;
+        req["webdav"] = webdav;
+    }
+    {
+        QJsonObject cryptoObj;
+        cryptoObj["password"] = crypto;
+        req["crypto"] = cryptoObj;
+    }
+    {
+        QJsonObject state;
+        state["last_local_hash"] = NekoGui::dataStore->sync_last_local_hash;
+        state["last_remote_etag"] = NekoGui::dataStore->sync_last_remote_etag;
+        req["state"] = state;
+    }
+    {
+        QJsonObject options;
+        options["force"] = false;
+        options["mode"] = "apply";
+        options["timeout_sec"] = 25;
+        options["remote_filename"] = "nekobox_sync.bin";
+        options["user_agent"] = NekoGui::dataStore->GetUserAgent(true);
+        req["options"] = options;
+    }
+
+    g_sync_auto_running = true;
+    MW_show_log("[Sync] uploading snapshot...");
+    auto proc = new QProcess(mw);
+    proc->setProgram(program);
+    proc->setWorkingDirectory(QDir::currentPath());
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    QObject::connect(proc, &QProcess::errorOccurred, mw, [=](QProcess::ProcessError) {
+        g_sync_auto_running = false;
+        MW_show_log("[Sync] process error: " + proc->errorString());
+        proc->deleteLater();
+    });
+
+    QObject::connect(proc, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                     mw, [=](int exitCode, QProcess::ExitStatus) {
+                         g_sync_auto_running = false;
+                         auto out = proc->readAllStandardOutput();
+                         auto err = proc->readAllStandardError();
+                         proc->deleteLater();
+
+                         QJsonParseError perr{};
+                         auto doc = QJsonDocument::fromJson(out, &perr);
+                         if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+                             MW_show_log("[Sync] output parse failed, exit=" + Int2String(exitCode) + " stderr=" + QString::fromUtf8(err));
+                             return;
+                         }
+                         auto obj = doc.object();
+                         bool ok = obj.value("ok").toBool();
+                         bool conflict = obj.value("conflict").toBool();
+                         auto msg = obj.value("message").toString();
+                         auto errStr = obj.value("error").toString();
+
+                         if (conflict) {
+                             MW_show_log("[Sync] conflict detected. Please open Basic Settings -> Sync to resolve.\n" + msg);
+                             return;
+                         }
+                         if (!ok) {
+                             MW_show_log("[Sync] failed: " + msg + " " + errStr);
+                             return;
+                         }
+
+                         NekoGui::dataStore->sync_last_local_hash = obj.value("local_hash").toString();
+                         NekoGui::dataStore->sync_last_remote_etag = obj.value("remote_etag").toString();
+                         NekoGui::dataStore->sync_last_time = obj.value("time").toVariant().toLongLong();
+                         NekoGui::dataStore->Save();
+                         MW_show_log("[Sync] uploaded.");
+                     });
+
+    proc->start();
+    proc->write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+    proc->closeWriteChannel();
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow) {
@@ -100,10 +286,45 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     ui->toolButton_preferences->setMenu(ui->menu_preferences);
     ui->toolButton_server->setMenu(ui->menu_server);
     ui->menubar->setVisible(false);
-    connect(ui->toolButton_document, &QToolButton::clicked, this, [=] { QDesktopServices::openUrl(QUrl("https://matsuridayo.github.io/")); });
-    connect(ui->toolButton_ads, &QToolButton::clicked, this, [=] { QDesktopServices::openUrl(QUrl("https://neko-box.pages.dev/喵")); });
     connect(ui->toolButton_update, &QToolButton::clicked, this, [=] { runOnNewThread([=] { CheckUpdate(); }); });
     connect(ui->toolButton_url_test, &QToolButton::clicked, this, [=] { speedtest_current_group(1, true); });
+    if (ui->toolButton_info) {
+        ui->toolButton_info->setToolTip(tr("版本信息"));
+        ui->toolButton_info->setStyleSheet("QToolButton { border: 1px solid palette(mid); border-radius: 9px; padding: 0px; }"
+                                           "QToolButton:hover { background: palette(light); }");
+        connect(ui->toolButton_info, &QToolButton::clicked, this, [=] {
+            auto coreVer = FormatCoreVersion();
+            if (coreVer.isEmpty()) coreVer = tr("未知");
+            auto appVer = QString(NKR_VERSION);
+            auto summary = tr("简介：内置 sing-box 内核，支持订阅管理、路由分流、测速与 WebDAV 同步。");
+            auto link = QStringLiteral("https://github.com/SagerNet/sing-box/releases");
+            QString text = tr("内核：%1\n客户端：%2\n\n%3\n\n<a href=\"%4\">sing-box 发布页</a>")
+                               .arg(coreVer, appVer, summary, link);
+            QMessageBox box(GetMessageBoxParent());
+            box.setWindowTitle(software_name);
+            box.setTextFormat(Qt::RichText);
+            box.setText(text);
+            box.setStandardButtons(QMessageBox::Ok);
+            if (auto label = box.findChild<QLabel *>("qt_msgbox_label")) {
+                label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+                label->setOpenExternalLinks(true);
+            }
+            box.exec();
+        });
+    }
+
+    // group traffic status (subscription quota) on the right side of Log/Connection tabs
+    label_group_subinfo = new QLabel(this);
+    label_group_subinfo->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
+    label_group_subinfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    label_group_subinfo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    {
+        auto f = label_group_subinfo->font();
+        f.setPointSize(std::max(8, f.pointSize() - 1));
+        label_group_subinfo->setFont(f);
+    }
+    ui->down_tab->setCornerWidget(label_group_subinfo, Qt::TopRightCorner);
+    refresh_group_subinfo();
 
     // Setup log UI
     ui->splitter->restoreState(DecodeB64IfValid(NekoGui::dataStore->splitter_state));
@@ -510,6 +731,7 @@ void MainWindow::show_group(int gid) {
     gsa.scroll_to_started = true;
     refresh_proxy_list_impl(-1, gsa);
 
+    refresh_group_subinfo();
     NekoGui::dataStore->refreshing_group = false;
 }
 
@@ -573,6 +795,10 @@ void MainWindow::dialog_message_impl(const QString &sender, const QString &info)
     } else if (sender == "SubUpdater") {
         if (info.startsWith("finish")) {
             refresh_proxy_list();
+            if (info.contains("dingyue")) {
+                TryAutoSyncAfterSubUpdate(this);
+            }
+            refresh_group_subinfo();
             if (!info.contains("dingyue")) {
                 show_log_impl(tr("Imported %1 profile(s)").arg(NekoGui::dataStore->imported_count));
             }
@@ -608,6 +834,28 @@ void MainWindow::on_menu_basic_settings_triggered() {
     USE_DIALOG(DialogBasicSettings)
 }
 
+void MainWindow::on_toolButton_cloud_clicked() {
+    if (dialog_is_using) return;
+    dialog_is_using = true;
+
+    auto dialog = new DialogBasicSettings(this);
+    connect(dialog, &QDialog::finished, this, [=] {
+        dialog->deleteLater();
+        dialog_is_using = false;
+    });
+
+    // Switch to the Sync tab for quick access.
+    if (auto tabs = dialog->findChild<QTabWidget *>("tabWidget")) {
+        if (auto syncTab = dialog->findChild<QWidget *>("tab_sync")) {
+            tabs->setCurrentWidget(syncTab);
+        } else if (tabs->count() > 0) {
+            tabs->setCurrentIndex(tabs->count() - 1);
+        }
+    }
+
+    dialog->show();
+}
+
 void MainWindow::on_menu_manage_groups_triggered() {
     USE_DIALOG(DialogManageGroups)
 }
@@ -622,6 +870,26 @@ void MainWindow::on_menu_vpn_settings_triggered() {
 
 void MainWindow::on_menu_hotkey_settings_triggered() {
     USE_DIALOG(DialogHotkey)
+}
+
+void MainWindow::refresh_group_subinfo() {
+    if (label_group_subinfo == nullptr) return;
+    auto group = NekoGui::profileManager->GetGroup(NekoGui::dataStore->current_group);
+    if (group == nullptr) {
+        label_group_subinfo->setText({});
+        label_group_subinfo->setToolTip({});
+        return;
+    }
+    auto txt = ParseSubInfoForStatus(group->info);
+    if (txt.isEmpty()) {
+        label_group_subinfo->setText({});
+        label_group_subinfo->setToolTip({});
+        return;
+    }
+
+    // Keep it compact on the tab bar; show full text on hover.
+    label_group_subinfo->setToolTip(group->name + "\n" + txt);
+    label_group_subinfo->setText(QFontMetrics(label_group_subinfo->font()).elidedText(txt, Qt::ElideRight, 520));
 }
 
 void MainWindow::on_commitDataRequest() {
@@ -858,7 +1126,18 @@ void MainWindow::refresh_status(const QString &traffic_update) {
         if (!NekoGui::dataStore->spmode_vpn && NekoGui::dataStore->spmode_system_proxy) tt << "[" + tr("System Proxy") + "]";
         if (NekoGui::dataStore->spmode_vpn && NekoGui::dataStore->spmode_system_proxy) tt << "[Tun+" + tr("System Proxy") + "]";
         tt << software_name;
-        if (!isTray) tt << "(" + QString(NKR_VERSION) + ")";
+        if (!isTray) {
+            // Keep internal version format (version-date), but show a more readable title (date version).
+            const auto ver = QString(NKR_VERSION);
+            auto titleVer = ver;
+            const auto dash = ver.indexOf('-');
+            if (dash > 0) {
+                const auto v = ver.left(dash);
+                const auto d = ver.mid(dash + 1);
+                if (!d.isEmpty()) titleVer = d + " " + v;
+            }
+            tt << "(" + titleVer + ")";
+        }
         if (!NekoGui::dataStore->active_routing.isEmpty() && NekoGui::dataStore->active_routing != "Default") {
             tt << "[" + NekoGui::dataStore->active_routing + "]";
         }
